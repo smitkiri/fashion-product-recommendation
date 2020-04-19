@@ -1,12 +1,30 @@
-# -*- coding: utf-8 -*-
-
 import cv2
+import sys
 import numpy as np
 from pickle import dump, load
 from sklearn.metrics import pairwise_distances
 import matplotlib.pyplot as plt
+from keras.applications.vgg16 import VGG16
+from datetime import datetime # library to compute run of various algorithm
 
-PICKLE_PATH = ".\\pickles\\"
+def drawProgressBar(percent, barLen = 20):
+    '''
+    Draws a progress bar, something like [====>    ] 20%
+    
+    Parameters
+    ------------
+    precent: float 
+             percentage completed, between 0 and 1
+    
+    barLen: int
+            Length of progress bar
+    '''
+    # Carriage return, returns to the begining of line to owerwrite
+    sys.stdout.write("\r")
+    sys.stdout.write("Progress: [{:<{}}] {:.0f}%".format("=" * int(barLen * percent) + ">", 
+                                                         barLen, percent * 100))
+    sys.stdout.flush()
+
 
 def read_images(path, filenames, extension = None, shape = None, labels = None, verbose = 0):
     '''
@@ -60,8 +78,8 @@ def read_images(path, filenames, extension = None, shape = None, labels = None, 
         try:
             img = cv2.imread(path + str(filenames[idx]) + extension)
             
-            if verbose == 1 and (idx + 1) % 1000 == 0: 
-                print("Extracted", idx+1, "images out of", total_files)
+            if verbose == 1: 
+                drawProgressBar(idx / total_files)
             
             if shape is not None:
                 if img.shape == shape:
@@ -76,8 +94,11 @@ def read_images(path, filenames, extension = None, shape = None, labels = None, 
                 if labels is not None:
                     y.append(idx)
         except:
-            print('Skipping ' + str(filenames[idx]) + extension + 
-                                ', no such file in directory ' + path)
+            sys.stdout.write('\nSkipping ' + str(filenames[idx]) + extension + 
+                                ', no such file in directory ' + path + '\n\r')
+    
+    if verbose == 1:
+        print("\n")
     
     # Converting list of arrays into multi-dimensional array 
     # if all images have the same shape
@@ -88,7 +109,7 @@ def read_images(path, filenames, extension = None, shape = None, labels = None, 
         return images, extracted_filenames, y
     else:
         return images, extracted_filenames
- 
+
 
 def save_pickle(file, variable):
     '''
@@ -126,153 +147,51 @@ def open_pickle(file):
         return load(f)
 
 
-def get_embeddings(image, resize = False):
+def resize_image(image, dimension = (80, 60, 3)):
     '''
-    Returns the VGG16 embeddings of given input image
+    Resizes the image to a specified lower dimension
+    
+    Parameters
+    -----------
+    image: numpy array
+           The image which is to be resized
+    
+    dimension: tuple / list
+               The target size
+    '''
+    if image.shape != dimension:
+            image = cv2.resize(image, (dimension[1], dimension[0]))
+    
+    return image  
+
+
+def get_embeddings(image, dimension = (80, 60, 3), model = None):
+    '''
+    Returns the embeddings of given input image
     
     Parameters
     -----------
     image: numpy array
            The image for which embeddings are needed.
-           Must be of shape (80, 60, 3)
+           Recommended shape (80, 60, 3)
            
-    resize: boolean
-            Wether to resize higher dimensional image to (80,60,3)
+    dimension: tuple / list
+               The target size if the image is to be resized
+               
+    model: keras model with predict function
+           The model to be used to get image embeddings, by default, uses VGG16
     '''
-    if image.shape != (80, 60, 3) and resize == True:
-        if image.ndim == 3:
-            image = cv2.resize(image, (60, 80))
-        else:
-            raise AttributeError("The image should be 3 - dimensional")
+    if image.ndim != 3:
+        raise AttributeError("The image should be 3 - dimensional")
     
-    if image.shape == (80, 60, 3):
-        image = image.reshape(1, 80, 60, 3)
-    
-    if image.shape != (1, 80, 60, 3):
-        raise AttributeError("The image shape should be (80, 60, 3)")
+    image = resize_image(image, dimension)
+    image = image.reshape(1, dimension[0], dimension[1], dimension[2])
         
-    model = open_pickle(PICKLE_PATH + 'embedded_images_sub')['model']
-    embedded_image = model.predict(image)
-    return embedded_image[0]
-
-
-def get_pca_transform(image, n_components = 145, resize = False):
-    '''
-    Returns the top 2 components of the image
+    if model is None:
+        model = VGG16(weights = 'imagenet', input_shape = dimension, include_top = False)
+        model.trainable = False
     
-    Parameters
-    -----------
-    image: numpy array
-           The image for which embeddings are needed.
-    
-    components: The number of components needed for the image.
-                Must be either 145 or 1000.
-    '''
-    if n_components == 145:
-        pca = open_pickle(PICKLE_PATH + 'pca_transformation_results_145')['object']
-    
-    elif n_components == 1000:
-        pca = open_pickle(PICKLE_PATH + 'pca_transformation_results_1000')['object']
-    
-    else:
-        raise ValueError("Number of components must be 145 or 1000")
-    
-    if resize == True:
-        image = cv2.resize(image, (60, 80))
-    
-    if image.ndim == 3:
-        image = image.reshape(1, image.shape[0] * image.shape[1] * image.shape[2])
-        
-    if image.ndim > 3 or image.ndim < 2:
-        raise AttributeError("The input image must be 2 or 3 dimensional")
-        
-    if image.shape[1] != pca.n_features_:
-        raise AttributeError("Shape mismatch, expected array of shape (n, " +
-                             str(pca.n_features_) + ") but got " + str(image.shape))
-
-    return pca.transform(image)
-
-
-def recommend_images(image, n, transformation, resize = False, 
-                     use_kmeans = True, metric = 'euclidean'):
-    '''
-    Returns top n images similar to given image
-    
-    Parameters
-    -----------
-    image: numpy array
-           The input image to compare other images to
-    
-    n: int
-       Number of similar images to return
-       
-    transformation: str
-                    The transformation to apply to input image.
-                    Currently supported values: 'pca_145', 'pca_1000', 
-                                                'embeddings_sub', 'embeddings_all'
-                    
-    resize: boolean
-            Used if to determine if the image size is greater than (80, 60, 3)
-    
-    use_kmeans: boolean
-                If True, uses K-Means to first predict the cluster of images
-                it belongs to, narrowing the search space
-                
-    metric: str
-            The distance metric to use
-    '''
-    valid_transformations = ['pca_145', 'pca_1000', 'embeddings_sub', 'embeddings_all']
-    
-    # Check for argument validity
-    if transformation.lower() not in valid_transformations:
-        raise ValueError("Currently supported values for transformation: 'pca_145'," 
-                         " 'pca_1000', 'embeddings_sub', 'embeddings_all'")
-    
-    transformation = transformation.lower().split('_')
-    
-    if transformation[0] == 'pca':
-        image = get_pca_transform(image, int(transformation[1]))
-        pca = open_pickle(PICKLE_PATH + "pca_transformation_results_" + transformation[1])
-        X = pca['transformed_images']
-        y = np.array(pca['image_names'])
-        y = y.reshape(y.shape[0], 1)
-    
-    else:
-        # Get input image embeddings and convert them to shape (1, 1024)
-        image = get_embeddings(image, resize)
-        image = image.reshape(1, image.shape[0] * image.shape[1] * image.shape[2])
-        
-        # Get pre-computed embeddings from data and convert them to shape (n, 1024)
-        embeddings = open_pickle(PICKLE_PATH + "embedded_images_" + transformation[1])
-        X = embeddings['data']
-        X = X.reshape(X.shape[0], X.shape[1] * X.shape[2] * X.shape[3])
-        
-        # Get image names corresponding to pre-computed embeddings
-        y = np.array(embeddings['images'])
-        y = y.reshape(y.shape[0], 1)
-        
-    if use_kmeans == True:
-        if transformation[0] == 'embeddings':
-            kmeans = open_pickle(PICKLE_PATH + "KMeans_embeddings_clusters_" +
-                                 transformation[1] + "_12")
-        else:
-            kmeans = open_pickle(PICKLE_PATH + "KMeans_pca_" + transformation[1] + 
-                                 "_clusters_12")
-        
-        # Get K-Means prediction and filter data accordingly
-        image_label = kmeans.predict(image)
-        X = X[kmeans.labels_ == image_label[0]]
-        y = y[kmeans.labels_ == image_label[0]]
-    
-    # Calculate distances of test image from each one in dataset 
-    # and make 2nd column as image names
-    distances = pairwise_distances(X, image, metric = metric)
-    distances = np.hstack((distances, y))
-    
-    # Sort distances matrix by 1st column (distances) and return top n image names
-    top_n = distances[distances[:, 0].argsort()][:n, 1].astype(int)
-    
-    return top_n
+    return model.predict(image)
 
 
 def plot_images(images, nrows = None, ncols = None, figsize = None, ax = None, 
@@ -321,7 +240,12 @@ def plot_images(images, nrows = None, ncols = None, figsize = None, ax = None,
         _, ax = plt.subplots(nrows, ncols, figsize = figsize)
     
     if len(images) == 1:
+        if bgr2rgb == True:
+            images[0] = cv2.cvtColor(images[0], cv2.COLOR_BGR2RGB)
+    
         ax.imshow(images[0])
+        ax.axis(axis_style)
+        
         return ax
     
     else:
@@ -346,4 +270,63 @@ def plot_images(images, nrows = None, ncols = None, figsize = None, ax = None,
                     ax[i + j].axis(axis_style)
         
         return ax
-          
+
+
+def recommend_images(image, n, database_images, transform = 'pca', pca_fit = None, 
+                     cluster_fit = None, distance_metric = "euclidean"):          
+    '''
+    image: numpy array
+           The input image to compare other images to
+    
+    n: int
+       Number of similar images to return
+                       
+    database_images: multi-dimensional numpy array
+                     database of images to compare input image to
+    
+    transform: str
+               The transformation to be used, must be pca or embeddings
+                     
+    pca_fit: sklearn.decomposition.PCA object
+             The pca object to transform the image into lower dimensions
+             
+    cluster_fit: clustering object with predict method
+                 If used, it first predicts the cluster of images in the databse 
+                 that the input image belongs to, narrowing the search space
+    
+    distance_metric: str
+                     The distance metric to use to compare input image with database images
+    '''
+    if transform.lower() == 'pca':
+        if pca_fit is None:
+            raise AttributeError("If transform is PCA, must pass pca_fit object")
+        
+        image = resize_image(image)
+        image = image.reshape(image.shape[0] * image.shape[1] * image.shape[2])
+        image = image / 255.0
+        image = pca_fit.transform(image.reshape(1,-1))
+        
+    elif transform.lower() == 'embeddings':
+        image = get_embeddings(image)
+        image = image.reshape(1, image.shape[1] * image.shape[2] * image.shape[3])
+    
+    else:
+        raise AttributeError("transform should either be 'pca' or 'embeddings'")
+        
+    if cluster_fit is not None:
+        image_label = cluster_fit.predict(image)[0]
+        database_labels = cluster_fit.predict(database_images)
+        image_indices = np.argwhere(database_labels == image_label)
+        database_images = database_images[database_labels == image_label]
+    
+    else:
+        image_indices = None
+        
+    distances = pairwise_distances(database_images, image, metric = distance_metric).flatten()
+    top_n_idx = [image_indices[idx][0] if image_indices is not None else idx for idx in distances.argsort()[:n]]
+    
+    return top_n_idx
+   
+
+def get_time():
+    return datetime.now()
